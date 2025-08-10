@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Moonlight Bunny — Jumping Runner</title>
+<style>
+  :root{
+    --bg-deep:#071026;
+    --moon:#cfe9ff;
+    --ui:#ffffffd9;
+    --accent:#ffd76a;
+  }
+  html,body{height:100%;margin:0;background:var(--bg-deep);font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:var(--ui);}
+  #game-wrap{position:relative;width:100%;height:100vh;overflow:hidden;display:flex;align-items:stretch;justify-content:center}
+  canvas{display:block;width:100%;height:100vh}
+  .hud{position:absolute;left:18px;top:18px;z-index:40;display:flex;gap:12px;align-items:center}
+  .scoreBox{background:rgba(255,255,255,0.06);backdrop-filter:blur(4px);padding:8px 12px;border-radius:12px;font-weight:600}
+  .centerUI{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:40;text-align:center}
+  .title{font-size:20px;background:rgba(255,255,255,0.04);display:inline-block;padding:12px 18px;border-radius:14px}
+  .hint{margin-top:10px;color:#cfe9ffcc}
+  .controls{position:absolute;right:18px;top:18px;z-index:40;display:flex;gap:8px}
+  button{background:rgba(255,255,255,0.06);border:0;padding:8px 12px;border-radius:10px;color:var(--ui);cursor:pointer;font-weight:700}
+  #overlay{position:absolute;left:0;top:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:45;pointer-events:none}
+  .overlayBox{background:rgba(0,0,0,0.5);padding:18px 22px;border-radius:14px;color:var(--ui);text-align:center;pointer-events:auto}
+  #pausedText{font-size:34px;letter-spacing:2px;}
+  .btnPrimary{background:linear-gradient(90deg,#ffd76a,#ffb86b);color:#071026;padding:10px 14px;border-radius:12px;font-weight:800}
+  .small{font-size:13px}
+  @media (max-width:520px){
+    .title{font-size:18px}
+    .scoreBox{padding:6px 9px;font-size:14px}
+  }
+</style>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="canvas"></canvas>
+
+  <div class="hud" aria-hidden>
+    <div class="scoreBox">Score: <span id="score">0</span></div>
+    <div class="scoreBox">High: <span id="high">0</span></div>
+  </div>
+
+  <div class="controls" aria-hidden>
+    <button id="pauseBtn">Pause (P)</button>
+  </div>
+
+  <div class="centerUI" id="startUI">
+    <div class="title">Moonlight Bunny</div>
+    <div class="hint small">Press <strong>Space</strong> or tap to jump • First jump starts music</div>
+  </div>
+
+  <div id="overlay" style="display:none">
+    <div class="overlayBox" id="gameOverUI" style="display:none">
+      <div style="font-size:20px;font-weight:800">Game Over</div>
+      <div style="margin:10px 0">Score: <span id="finalScore">0</span></div>
+      <button class="btnPrimary" id="retryBtn">Play again</button>
+    </div>
+
+    <div class="overlayBox" id="pausedUI" style="display:none">
+      <div id="pausedText">PAUSED</div>
+      <div class="small" style="margin-top:8px">Press P to resume</div>
+    </div>
+  </div>
+</div>
+
+<!-- Tone.js -->
+<script src="https://cdn.jsdelivr.net/npm/tone@14.7.77/build/Tone.min.js"></script>
+
+<script>
+/* Moonlight Bunny - Single-file endless runner
+   - Canvas rendering
+   - Tone.js for music and SFX
+   - Space / click / tap to jump
+   - P to pause
+   - Collect carrots, avoid lanterns
+*/
+
+// ---- Canvas setup ----
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let DPR = Math.max(1, window.devicePixelRatio || 1);
+function resize(){
+  DPR = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = innerWidth * DPR;
+  canvas.height = innerHeight * DPR;
+  canvas.style.width = innerWidth + 'px';
+  canvas.style.height = innerHeight + 'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- Game state ----
+let running = false;
+let paused = false;
+let gameOver = false;
+let score = 0;
+let highScore = parseInt(localStorage.getItem('mb_high') || '0', 10);
+document.getElementById('high').textContent = highScore;
+
+const groundY = () => Math.round(innerHeight * 0.78); // ground baseline in CSS pixels
+
+// ---- Player (rabbit) ----
+const rabbit = {
+  x: innerWidth * 0.18,
+  y: groundY(),
+  w: 80,
+  h: 64,
+  vy: 0,
+  gravity: 1.2,
+  jumpStrength: 18,
+  grounded: true,
+  tailGlow: 0,
+  idleTimer: 0
+};
+
+// ---- World ----
+let speed = 4;          // world scroll speed
+let spawnTimer = 0;
+let spawnInterval = 1200; // ms
+let lastTime = performance.now();
+let objects = []; // obstacles & carrots
+
+// ---- Visual elements: stars, fireflies (parallax layers) ----
+const stars = [];
+const fireflies = [];
+function initParticles() {
+  stars.length = 0;
+  fireflies.length = 0;
+  const starCount = Math.floor(innerWidth / 8);
+  for (let i=0;i<starCount;i++){
+    stars.push({
+      x: Math.random()*innerWidth,
+      y: Math.random()*(innerHeight*0.6),
+      size: Math.random()*2 + 0.4,
+      layer: 0.15 + Math.random()*0.85,
+      twinkle: Math.random()*1.2
+    });
+  }
+  const ffCount = Math.floor(innerWidth / 60);
+  for (let i=0;i<ffCount;i++){
+    fireflies.push({
+      x: Math.random()*innerWidth,
+      y: groundY() - 40 - Math.random()*160,
+      vx: (Math.random()*0.6 - 0.3),
+      vy: (Math.random()*0.2 - 0.1),
+      glow: Math.random()*0.6+0.6,
+      layer: 0.6 + Math.random()*0.9,
+      phase: Math.random()*Math.PI*2
+    });
+  }
+}
+initParticles();
+window.addEventListener('resize', ()=>{ rabbit.x = innerWidth * 0.18; initParticles(); });
+
+// ---- Tone.js audio setup ----
+let audioStarted = false;
+let bgLoop, jumpSynth, collectSynth;
+function initAudio(){
+  // Basic "video-gamey" loop using Tone.Loop and a simple synth
+  const bpm = 110;
+  Tone.Transport.bpm.value = bpm;
+  const drum = new Tone.MembraneSynth({pitchDecay:0.008,octaves:4,envelope:{attack:0.001, decay:0.2, sustain:0}})
+    .toDestination();
+  const bass = new Tone.Synth({oscillator:{type:'sine'},envelope:{attack:0.01,decay:0.2,sustain:0.2,release:0.5}})
+    .toDestination();
+  const pad = new Tone.PolySynth(Tone.Synth, {
+    oscillator:{type:'sine'},
+    envelope:{attack:0.6,decay:0.8,sustain:0.4,release:1.6}
+  }).toDestination();
+
+  // Patterned loop
+  let step = 0;
+  bgLoop = new Tone.Loop((time)=>{
+    // simple kick/clap pattern
+    if (step % 4 === 0) drum.triggerAttackRelease("C2","8n",time);
+    if (step % 8 === 4) drum.triggerAttackRelease("G2","16n",time);
+    if (step % 6 === 0) bass.triggerAttackRelease(["C3"],"8n",time,0.5);
+    if (step % 16 === 0) pad.triggerAttackRelease(["C4","E4","G4"],"2n",time,0.08);
+    step++;
+  },"8n");
+
+  // Simple SFX synths
+  jumpSynth = new Tone.Synth({oscillator:{type:'triangle'},envelope:{attack:0.001,decay:0.12,sustain:0}}).toDestination();
+  collectSynth = new Tone.Synth({oscillator:{type:'sawtooth'},envelope:{attack:0.001,decay:0.18,sustain:0}}).toDestination();
+}
+
+// start/stop music
+function startMusic(){
+  if (!audioStarted){
+    initAudio();
+    Tone.start(); // ensure started on user gesture
+    bgLoop.start(0);
+    Tone.Transport.start();
+    audioStarted = true;
+    running = true;
+    document.getElementById('startUI').style.display = 'none';
+  }
+}
+function stopMusic(){
+  if (audioStarted){
+    bgLoop.stop();
+    Tone.Transport.pause();
+  }
+}
+function resumeMusic(){
+  if (audioStarted){
+    bgLoop.start();
+    Tone.Transport.start();
+  }
+}
+
+// ---- Input ----
+function doJump(){
+  if (gameOver) return;
+  if (!audioStarted) startMusic();
+  if (rabbit.grounded){
+    rabbit.vy = -rabbit.jumpStrength;
+    rabbit.grounded = false;
+    // jump SFX
+    jumpSynth.triggerAttackRelease("A5","8n");
+  }
+}
+window.addEventListener('keydown', (e)=>{
+  if (e.code === 'Space') { e.preventDefault(); doJump(); }
+  if (e.key.toLowerCase() === 'p'){ togglePause(); }
+});
+window.addEventListener('pointerdown', (e)=>{ e.preventDefault(); doJump(); });
+
+// ---- Pause ----
+function togglePause(){
+  if (!running || gameOver) return;
+  paused = !paused;
+  document.getElementById('pausedUI').style.display = paused ? 'block' : 'none';
+  document.getElementById('overlay').style.display = paused ? 'flex' : 'none';
+  if (paused){ stopMusic(); } else { resumeMusic(); }
+}
+document.getElementById('pauseBtn').addEventListener('click', togglePause);
+
+// ---- Objects (lanterns & carrots) ----
+function spawnObject(type){
+  // type: 'lantern' or 'carrot'
+  const baseY = groundY();
+  const size = (type==='lantern') ? 46 + Math.random()*18 : 34 + Math.random()*10;
+  const y = baseY - size - (type==='carrot' ? 18 + Math.random()*40 : 6);
+  const obj = {
+    id: Math.random().toString(36).slice(2),
+    type,
+    x: innerWidth + 80 + Math.random()*120,
+    y,
+    w: size,
+    h: size,
+    collected: false,
+    glow: Math.random()*0.9 + 0.6,
+    rot: Math.random()*Math.PI*2
+  };
+  objects.push(obj);
+}
+
+// ---- Collision helpers ----
+function rectsOverlap(a,b){
+  return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+}
+
+// ---- Game loop ----
+function update(dt){
+  if (!running || paused || gameOver) return;
+
+  // increase difficulty slowly
+  speed += dt * 0.00003; // small increase over time
+
+  // spawn logic every X ms
+  spawnTimer += dt;
+  if (spawnTimer > spawnInterval){
+    spawnTimer = 0;
+    // randomly spawn lantern or carrot; more lanterns than carrots
+    if (Math.random() < 0.72){
+      spawnObject('lantern');
+    } else {
+      spawnObject('carrot');
+    }
+  }
+
+  // update rabbit physics
+  rabbit.vy += rabbit.gravity;
+  rabbit.y += rabbit.vy;
+  const floor = groundY() - rabbit.h;
+  if (rabbit.y >= floor){
+    rabbit.y = floor;
+    rabbit.vy = 0;
+    rabbit.grounded = true;
+  } else {
+    rabbit.grounded = false;
+  }
+  // idle animation when grounded
+  if (rabbit.grounded){
+    rabbit.idleTimer += dt * 0.005;
+    rabbit.tailGlow = 0.6 + Math.sin(rabbit.idleTimer) * 0.2;
+  } else {
+    rabbit.tailGlow = 1.0;
+  }
+
+  // move objects left
+  for (let i = objects.length - 1; i >= 0; i--){
+    const o = objects[i];
+    o.x -= speed * (o.type === 'carrot' ? 1.05 : 1.0);
+    o.rot += 0.02;
+    // offscreen cleanup
+    if (o.x + o.w < -40){
+      objects.splice(i,1);
+      continue;
+    }
+    // collision check
+    const rb = {x: rabbit.x + 8, y: rabbit.y + 8, w: rabbit.w - 16, h: rabbit.h - 16};
+    const ob = {x: o.x, y: o.y, w: o.w, h: o.h};
+    if (rectsOverlap(rb, ob)){
+      if (o.type === 'carrot'){
+        // collect
+        if (!o.collected){
+          o.collected = true;
+          score += 15;
+          // collect SFX (higher pitch)
+          collectSynth.triggerAttackRelease("E6","16n");
+          // small burst effect: remove object
+          objects.splice(i,1);
+          continue;
+        }
+      } else if (o.type === 'lantern'){
+        // hit -> game over
+        gameOver = true;
+        running = false;
+        // stop music
+        stopMusic();
+        // show overlay
+        document.getElementById('overlay').style.display = 'flex';
+        const go = document.getElementById('gameOverUI');
+        go.style.display = 'block';
+        document.getElementById('finalScore').textContent = score;
+        if (score > highScore){
+          highScore = score;
+          localStorage.setItem('mb_high', highScore);
+          document.getElementById('high').textContent = highScore;
+        }
+        break;
+      }
+    }
+  }
+
+  // update score gradually based on speed
+  score += Math.floor(dt * 0.01 * speed);
+  document.getElementById('score').textContent = score;
+}
+
+// ---- Drawing ----
+function drawBackground(){
+  // deep gradient
+  const grd = ctx.createLinearGradient(0,0,0,innerHeight);
+  grd.addColorStop(0,'#04122a');
+  grd.addColorStop(0.5,'#0a2b47');
+  grd.addColorStop(1,'#071026');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0,0,innerWidth,innerHeight);
+
+  // moon
+  const moonX = innerWidth * 0.82, moonY = innerHeight * 0.18;
+  const moonR = Math.min(120, innerWidth * 0.09);
+  const mGrad = ctx.createRadialGradient(moonX,moonY,moonR*0.2, moonX,moonY, moonR);
+  mGrad.addColorStop(0, '#f8fbff');
+  mGrad.addColorStop(0.6, '#dbeeff');
+  mGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = mGrad;
+  ctx.globalAlpha = 0.95;
+  ctx.beginPath(); ctx.arc(moonX,moonY,moonR,0,Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1.0;
+
+  // stars (parallax)
+  for (let s of stars){
+    const sx = (s.x - (performance.now()*0.02)*(s.layer*0.02)) % innerWidth;
+    const tw = 0.5 + Math.sin(performance.now()*0.002 + s.twinkle) * 0.5;
+    ctx.globalAlpha = 0.9 * (0.6 + 0.4*tw);
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    ctx.arc(sx, s.y, s.size, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1.0;
+
+  // distant hills (parallax)
+  const hillsY = groundY() - 140;
+  ctx.fillStyle = '#063047';
+  ctx.beginPath();
+  ctx.moveTo(0, innerHeight);
+  ctx.quadraticCurveTo(innerWidth*0.2, hillsY+30, innerWidth*0.45, innerHeight-60);
+  ctx.quadraticCurveTo(innerWidth*0.65, hillsY-20, innerWidth, innerHeight-30);
+  ctx.lineTo(innerWidth, innerHeight);
+  ctx.closePath();
+  ctx.fill();
+
+  // fireflies (glowing moving dots)
+  for (let ff of fireflies){
+    ff.x += ff.vx * (ff.layer*0.5 + 0.2);
+    ff.y += ff.vy * 0.8;
+    ff.phase += 0.02;
+    if (ff.x < -20) ff.x = innerWidth + 20;
+    if (ff.x > innerWidth + 20) ff.x = -20;
+    if (ff.y < 20) ff.y = 40;
+    if (ff.y > groundY() - 10) ff.y = groundY() - 40;
+
+    const gx = Math.round(ff.x - (performance.now()*0.01)*(ff.layer*0.1));
+    const glow = 6 * ff.glow * (0.8 + Math.sin(ff.phase)*0.2);
+    ctx.save();
+    ctx.globalAlpha = 0.9 * ff.glow;
+    ctx.fillStyle = '#ffe6a8';
+    ctx.beginPath();
+    ctx.shadowBlur = glow;
+    ctx.shadowColor = '#ffe6a8';
+    ctx.arc(gx, ff.y, 3 + ff.glow*2, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawGrass(){
+  // one layer of grass in front
+  const gy = groundY();
+  // ground base
+  ctx.fillStyle = '#081b18';
+  ctx.fillRect(0, gy, innerWidth, innerHeight - gy);
+  // grass blades
+  ctx.save();
+  ctx.translate(0, gy);
+  ctx.fillStyle = '#0c3b2f';
+  const bladeW = 8;
+  for (let x=0;x<innerWidth+bladeW;x+=bladeW){
+    const h = 12 + Math.sin((x + performance.now()*0.002)*0.02) * 6;
+    ctx.beginPath();
+    ctx.moveTo(x,0);
+    ctx.quadraticCurveTo(x+bladeW*0.25, -h*1.2, x+bladeW*0.5, 0);
+    ctx.quadraticCurveTo(x+bladeW*0.75, -h*0.8, x+bladeW, 0);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawRabbit(){
+  const x = rabbit.x, y = rabbit.y, w = rabbit.w, h = rabbit.h;
+  // shadow / ground contact
+  ctx.save();
+  ctx.fillStyle = 'rgba(1,2,4,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(x + w*0.5, y + h + 6, w*0.55, 10, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+
+  // body (slightly 3D cartoon)
+  ctx.save();
+  ctx.translate(x, y);
+  // body
+  const bodyGrad = ctx.createLinearGradient(w*0.15,0,w*0.85,h);
+  bodyGrad.addColorStop(0,'#fff8f1');
+  bodyGrad.addColorStop(1,'#ffe7d5');
+  ctx.fillStyle = bodyGrad;
+  roundRect(ctx, 8, 6, w - 16, h - 18, 18);
+  ctx.fill();
+
+  // ear (back)
+  ctx.fillStyle = '#ffe9dd';
+  roundRect(ctx, w*0.55, -18 + Math.sin(rabbit.idleTimer*0.11)*2, w*0.18, 34, 10);
+  // ear (front)
+  ctx.fillStyle = '#ffd6c5';
+  roundRect(ctx, w*0.35, -22 + Math.sin(rabbit.idleTimer*0.09)*2, w*0.18, 36, 10);
+
+  // eye
+  ctx.fillStyle = '#223';
+  ctx.beginPath(); ctx.ellipse(w*0.66, h*0.18, 3.6, 4.6, 0,0,Math.PI*2); ctx.fill();
+
+  // cute nose
+  ctx.fillStyle = '#ffb6b6';
+  ctx.beginPath(); ctx.moveTo(w*0.56, h*0.28); ctx.lineTo(w*0.62, h*0.28); ctx.lineTo(w*0.59, h*0.32); ctx.fill();
+
+  // tail with glow (pulsing)
+  const tailX = w*0.06, tailY = h*0.28;
+  ctx.beginPath();
+  ctx.fillStyle = '#fff1d6';
+  ctx.ellipse(tailX, tailY, 12, 10, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // tail glow
+  ctx.save();
+  ctx.globalAlpha = 0.25 * rabbit.tailGlow;
+  ctx.shadowBlur = 18 * rabbit.tailGlow;
+  ctx.shadowColor = '#ffe6a6';
+  ctx.fillStyle = '#ffdca8';
+  ctx.beginPath(); ctx.ellipse(tailX, tailY, 18, 14, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+function drawObjects(){
+  for (let o of objects){
+    if (o.type === 'lantern'){
+      drawLantern(o);
+    } else {
+      drawCarrot(o);
+    }
+  }
+}
+
+function drawLantern(o){
+  // lantern body
+  ctx.save();
+  const x = o.x, y = o.y, s = o.w;
+  ctx.translate(x + s*0.5, y + s*0.25);
+  ctx.rotate(Math.sin(o.rot)*0.03);
+  ctx.translate(- (x + s*0.5), - (y + s*0.25));
+  // glow
+  ctx.save();
+  ctx.globalAlpha = 0.9 * o.glow;
+  ctx.shadowBlur = 20 * o.glow;
+  ctx.shadowColor = '#ffdca8';
+  ctx.fillStyle = '#ffeccf';
+  roundRect(ctx, x + s*0.15, y, s*0.7, s*0.9, 10);
+  ctx.restore();
+
+  // frame and hook
+  ctx.fillStyle = '#c97f5b';
+  ctx.fillRect(x + s*0.44, y - 10, s*0.06, 8);
+  ctx.beginPath();
+  ctx.strokeStyle = '#9b5f46';
+  ctx.lineWidth = 2;
+  ctx.arc(x + s*0.47, y - 8, 6, Math.PI, Math.PI*2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawCarrot(o){
+  const x = o.x, y = o.y, s = o.w;
+  ctx.save();
+  // carrot root (glow)
+  ctx.globalAlpha = 0.95;
+  ctx.shadowBlur = 14 * o.glow;
+  ctx.shadowColor = '#ffb36b';
+  ctx.fillStyle = '#ff8c38';
+  ctx.beginPath();
+  ctx.ellipse(x + s*0.5, y + s*0.55, s*0.32, s*0.55, o.rot*0.1, 0, Math.PI*2);
+  ctx.fill();
+
+  // top leaves
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#86d57f';
+  ctx.beginPath();
+  ctx.ellipse(x + s*0.5, y + s*0.12, s*0.35, s*0.12, -0.3 + Math.sin(o.rot)*0.08, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// helper: rounded rect
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+// ---- Main render loop ----
+function render(now){
+  const dt = now - lastTime;
+  lastTime = now;
+  update(dt);
+
+  // Clear
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+
+  // Background
+  drawBackground();
+
+  // Objects behind rabbit (some depth)
+  for (let o of objects){
+    if (o.x + o.w < rabbit.x + rabbit.w*0.2) { // draw those behind
+      if (o.type === 'lantern') drawLantern(o);
+      else drawCarrot(o);
+    }
+  }
+
+  // rabbit
+  drawRabbit();
+
+  // objects in front
+  for (let o of objects){
+    if (o.x + o.w >= rabbit.x + rabbit.w*0.2) {
+      if (o.type === 'lantern') drawLantern(o);
+      else drawCarrot(o);
+    }
+  }
+
+  // grass overlay
+  drawGrass();
+
+  // HUD/overlays handled by DOM
+
+  if (!gameOver) requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ---- Start conditions ----
+function resetGame(){
+  gameOver = false;
+  running = false;
+  paused = false;
+  score = 0;
+  speed = 4;
+  objects = [];
+  spawnTimer = 0;
+  document.getElementById('score').textContent = score;
+  document.getElementById('overlay').style.display = 'none';
+  document.getElementById('gameOverUI').style.display = 'none';
+  document.getElementById('pausedUI').style.display = 'none';
+  document.getElementById('startUI').style.display = 'block';
+  lastTime = performance.now();
+}
+document.getElementById('retryBtn').addEventListener('click', ()=>{
+  resetGame();
+  // start after slight delay so players can take their position
+  setTimeout(()=>{ running = true; }, 120);
+});
+resetGame();
+
+// ---- Utility: periodically spawn obstacles while running ----
+// We'll use a timer loop to spawn initially so the player has something to do
+setInterval(()=>{
+  if (running && !paused && !gameOver){
+    // occasionally spawn extra carrots or lanterns
+    if (Math.random() < 0.6) spawnObject('lantern'); else spawnObject('carrot');
+  }
+}, 1400);
+
+// ensure first frame sizes are correct
+window.addEventListener('load', ()=>{ resize(); });
+
+// ---- Accessibility hints ----
+document.addEventListener('visibilitychange', ()=>{
+  if (document.hidden && running && !gameOver){
+    paused = true;
+    document.getElementById('pausedUI').style.display = 'block';
+    document.getElementById('overlay').style.display = 'flex';
+    stopMusic();
+  }
+});
+
+// ---- Prevent accidental scroll on spacebar for a better experience ----
+window.addEventListener('keydown', (e)=>{
+  if(e.code === 'Space') e.preventDefault();
+}, {passive:false});
+
+</script>
+</body>
+</html>
